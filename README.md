@@ -2,6 +2,10 @@
 
   First iteration of our STM32 project being used to interface with several communication and data collection modules.
 
+**New to the project?** Start with [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+It covers installing the tools, building, flashing, reading the serial output
+and opening a pull request.
+
 ## Wiring (NUCLEO-F446RE)
 
 All modules are powered from 3V3 (CN7-16) and GND (CN7-20). Firmware lives in
@@ -23,6 +27,11 @@ All modules are powered from 3V3 (CN7-16) and GND (CN7-20). Firmware lives in
 | | RST | PC6 | CN10-4 |
 | **SDIO** (4-bit) | CLK / CMD | PB2 / PD2 | CN10-22 / CN7-4 |
 | SD card breakout | D0 / D1 / D2 / D3 | PC8 / PB0 / PB1 / PC11 | CN10-2 / CN7-34 / CN10-24 / CN7-2 |
+
+The firmware prints a startup report (which parts initialised) and one line
+of readings per second on USART2, which the Nucleo's ST-LINK passes to the PC
+as a USB serial port: open it at **115200 baud**. `printf()` goes to the same
+port.
 
 Radio packets use the Adafruit/RadioHead defaults (915 MHz, SF7, BW 125 kHz,
 CR 4/5), so a Feather or Raspberry Pi running Adafruit's RFM9x library can be
