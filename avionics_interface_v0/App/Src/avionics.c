@@ -3,7 +3,6 @@
  * @brief   Sensor bring-up, sampling loop and radio telemetry.
  */
 #include "avionics.h"
-#include <stdio.h>
 #include "main.h"
 #include "spi.h"
 #include "sdio.h"
@@ -12,7 +11,6 @@
 #include "rfm95.h"
 
 #define GROUND_SAMPLES 25U
-#define PRINT_PERIOD_MS 1000U
 
 avionics_telemetry_t g_telemetry;
 
@@ -22,9 +20,10 @@ static rfm95_t radio;
 static uint8_t status;
 static float ground_pressure_pa = 101325.0f;
 static uint32_t last_tx_ms;
-static uint32_t last_print_ms;
-static uint32_t packets_sent;
-static bmp388_data_t last_baro;
+
+// Watchdog
+IWDG_HandleTypeDef hiwdg;
+
 
 static int16_t to_fixed(float v, float scale)
 {
@@ -57,52 +56,26 @@ static void calibrate_ground_pressure(void)
   }
 }
 
-static const char *ok_or_failed(uint8_t bit)
-{
-  return (status & bit) != 0U ? "OK" : "FAILED";
-}
-
-/* Boot report on the serial port: one line per part, so a wiring problem
- * shows up straight away. */
-static void print_startup_report(void)
-{
-  printf("\r\n=== DSRT avionics started ===\r\n");
-  printf("  BMP388 barometer : %s\r\n", ok_or_failed(AVIONICS_STATUS_BMP388));
-  printf("  BNO085 IMU       : %s\r\n", ok_or_failed(AVIONICS_STATUS_BNO085));
-  printf("  RFM95 radio      : %s\r\n", ok_or_failed(AVIONICS_STATUS_RFM95));
-  printf("  SD card          : %s\r\n",
-         (status & AVIONICS_STATUS_SD) != 0U ? "found" : "not found");
-  printf("  status byte      : 0x%02X\r\n\r\n", status);
-}
-
-/* One human-readable line of the latest readings. Takes ~10 ms at 115200
- * baud, so it only runs once a second. */
-static void print_readings(uint32_t now)
-{
-  printf("[%5lu.%03lu s]", now / 1000U, now % 1000U);
-  if ((status & AVIONICS_STATUS_BMP388) != 0U) {
-    printf("  baro %.0f Pa  alt %.2f m  %.1f C",
-           (double)last_baro.pressure_pa, (double)g_telemetry.altitude_agl_m,
-           (double)last_baro.temperature_c);
-  }
-  if ((status & AVIONICS_STATUS_BNO085) != 0U) {
-    printf("  |  accel %.2f %.2f %.2f m/s2  gyro %.2f %.2f %.2f rad/s",
-           (double)imu.data.accel_mps2.x, (double)imu.data.accel_mps2.y,
-           (double)imu.data.accel_mps2.z, (double)imu.data.gyro_rps.x,
-           (double)imu.data.gyro_rps.y, (double)imu.data.gyro_rps.z);
-  }
-  if ((status & AVIONICS_STATUS_RFM95) != 0U) {
-    printf("  |  radio %lu sent", packets_sent);
-  }
-  printf("\r\n");
-}
-
 void avionics_init(void)
 {
-  /* Send printf() output straight away instead of waiting for a full buffer. */
-  setvbuf(stdout, NULL, _IONBF, 0);
-  printf("\r\nDSRT avionics booting (takes a few seconds)...\r\n");
   status = 0;
+
+
+  // Initialize our watchdog system
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg.Init.Reload = 1000;
+
+  if (HAL_IWDG_Init(&hiwdg) == HAL_OK)
+  {
+    // Our initialization went well, so we're gonna set the status bit responsible
+    // for keeping track of this initialization to 1
+    status |= AVIONICS_STATUS_WATCHDOG;
+  }else{
+    // So if this happens, it's really really bad, and we need to figure out what to do
+    // Essentially if this ever happens, the board is in a "crashable" state, where if it
+    // runs into an error, it'll just stop working
+  }
 
   if (bmp388_init(&baro, &hspi1, BMP388_CS_GPIO_Port, BMP388_CS_Pin) == HAL_OK) {
     status |= AVIONICS_STATUS_BMP388;
@@ -133,8 +106,6 @@ void avionics_init(void)
 
   g_telemetry.status = status;
   last_tx_ms = HAL_GetTick();
-  last_print_ms = last_tx_ms;
-  print_startup_report();
 }
 
 void avionics_run(void)
@@ -158,7 +129,6 @@ void avionics_run(void)
   if ((status & AVIONICS_STATUS_BMP388) != 0U && bmp388_data_ready(&baro)) {
     bmp388_data_t d;
     if (bmp388_read(&baro, &d) == HAL_OK) {
-      last_baro = d;
       t->pressure_pa = d.pressure_pa;
       t->altitude_agl_m = bmp388_altitude_m(d.pressure_pa, ground_pressure_pa);
       t->temperature_cc = to_fixed(d.temperature_c, 100.0f);
@@ -171,15 +141,16 @@ void avionics_run(void)
       last_tx_ms = now;
       t->time_ms = now;
       t->status = status;
-      if (rfm95_send(&radio, (const uint8_t *)t, sizeof(*t)) == HAL_OK) {
-        packets_sent++;
-      }
+      (void)rfm95_send(&radio, (const uint8_t *)t, sizeof(*t));
     }
   }
 
-  uint32_t now = HAL_GetTick();
-  if (now - last_print_ms >= PRINT_PERIOD_MS) {
-    last_print_ms = now;
-    print_readings(now);
-  }
+
+
+
+  // ----------- VERY IMPORTANT ----------------
+  // This keeps feeding the watchdog, without this line the board cannot
+  // reboot if it gets stuck in an infinite loop or crashes
+  HAL_IWDG_Refresh(&hiwdg);
+
 }
